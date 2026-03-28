@@ -1,0 +1,14 @@
+name = "wfla-wall"
+compatibility_date = "2024-01-01"
+pages_build_output_dir = "./public"
+
+[vars]
+RESTAURANT_NAME = "WFLAwall"
+
+[[kv_namespaces]]
+binding = "RESTAURANT_DB"
+id = "YOUR_KV_DB_ID"
+
+[[kv_namespaces]]
+binding = "RESTAURANT_IMAGES"
+id = "YOUR_KV_IMAGES_ID"
