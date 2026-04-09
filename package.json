@@ -1,0 +1,17 @@
+{
+  "name": "wfla-wall",
+  "version": "1.0.0",
+  "description": "WFLAwall - Cloudflare部署版本",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler pages dev ./public",
+    "deploy": "wrangler pages project create wfla-wall && wrangler pages deploy ./public"
+  },
+  "dependencies": {
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "wrangler": "^3.24.0"
+  }
+}
