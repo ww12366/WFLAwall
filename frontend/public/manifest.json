@@ -1,0 +1,9 @@
+{
+  "name": "WFLA wall 餐厅评分",
+  "short_name": "WFLA wall",
+  "description": "餐厅评分网站",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f5",
+  "theme_color": "#398bd4"
+}

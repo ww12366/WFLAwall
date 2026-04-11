@@ -1,0 +1,12 @@
+name = "wfla-backend"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "wfla-db"
+database_id = "92c5042b-e201-42eb-a94c-a47f3d3b44cf"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "wfla-images"
