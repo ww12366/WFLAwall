@@ -1,6 +1,6 @@
-# WFLAwall (WFLA 贴吧)
+# WFLAwall (WFLA 贴吧/校园墙)
 
-一个基于 Cloudflare Workers + D1 的匿名论坛应用。
+一个基于 Cloudflare Workers + D1 + R2 的论坛应用。所有人可以随意发帖，内容不限
 
 ## 技术栈
 
