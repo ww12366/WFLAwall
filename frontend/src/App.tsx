@@ -12,7 +12,9 @@ import {
   ArrowBack as ArrowBackIcon,
   FavoriteBorder, Favorite,
   PhotoCamera, Close as CloseIcon, Image as ImageIcon,
-  MoreVert as MoreVertIcon
+  MoreVert as MoreVertIcon,
+  Person as PersonIcon, List as ListIcon, Star as StarIcon,
+  Visibility as VisibilityIcon, ChatBubble as ChatBubbleIcon
 } from '@mui/icons-material'
 
 const API_BASE = 'https://wfla-backend.r61105507.workers.dev/api'
@@ -39,6 +41,7 @@ interface Restaurant {
   authorAvatar?: string
   authorRole?: number
   likeCount?: number
+  viewCount?: number
 }
 
 interface RestaurantDetail extends Restaurant {
@@ -96,11 +99,20 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<Restaurant[]>([])
   const [searchUsers, setSearchUsers] = useState<User[]>([])
-  const [searchType, setSearchType] = useState<'posts' | 'users'>('posts')
+const [searchType, setSearchType] = useState<'posts' | 'users'>('posts')
   const [isSearching, setIsSearching] = useState(false)
+  const [profileMenuState, setProfileMenuState] = useState<'menu' | 'manage' | 'following' | 'favorites'>('menu')
+  const [followingCount, setFollowingCount] = useState(0)
+  const [followersCount, setFollowersCount] = useState(0)
+  const [favoritesCount, setFavoritesCount] = useState(0)
+  const [followingList, setFollowingList] = useState<User[]>([])
+  const [favoritesList, setFavoritesList] = useState<Restaurant[]>([])
+  const [otherUserFollowing, setOtherUserFollowing] = useState(false)
+  const [feedType, setFeedType] = useState<'recommend' | 'following'>('recommend')
 
   const [postLikes, setPostLikes] = useState<Record<string, { count: number; liked: boolean }>>({})
   const [commentLikes, setCommentLikes] = useState<Record<string, { count: number; liked: boolean }>>({})
+  const [postViews, setPostViews] = useState<Record<string, number>>({})
 
   useEffect(() => {
     const savedUser = localStorage.getItem('user')
@@ -116,31 +128,51 @@ function App() {
     if (user) {
       loadRestaurants()
     }
-  }, [user])
+  }, [user, feedType])
 
   async function loadRestaurants() {
     const currentUser = user
     setIsLoadingInitial(true)
     try {
-      const res = await fetch(`${API_BASE}/restaurants`)
+      let res
+      console.log('loadRestaurants feedType:', feedType, 'user:', currentUser?.user_id)
+      if (feedType === 'following' && currentUser) {
+        res = await fetch(`${API_BASE}/following-posts`, {
+          headers: getAuthHeaders()
+        })
+        console.log('following-posts response:', res.status)
+      } else {
+        res = await fetch(`${API_BASE}/restaurants`)
+      }
       if (!res.ok) { setIsLoadingInitial(false); return }
       const data = await res.json()
+      console.log('data length:', data?.length)
       setRestaurants(data || [])
       
       if (currentUser && data.length > 0) {
         const headers = getAuthHeaders()
         const likesData: Record<string, { count: number; liked: boolean }> = {}
+        const viewsData: Record<string, number> = {}
         
         for (const r of data) {
           try {
             const likeRes = await fetch(`${API_BASE}/likes/post/${r.id}`, { headers })
             const likeData = await likeRes.json()
-            likesData[r.id] = { count: likeData.likeCount || 0, liked: likeData.userLiked || false }
+            likesData[r.id] = { count: likeData.likeCount ?? r.likeCount ?? 0, liked: likeData.userLiked ?? false }
           } catch {
-            likesData[r.id] = { count: r.likeCount || 0, liked: false }
+            likesData[r.id] = { count: r.likeCount ?? 0, liked: false }
+          }
+          
+          try {
+            const viewRes = await fetch(`${API_BASE}/posts/${r.id}/views-count`)
+            const viewData = await viewRes.json()
+            viewsData[r.id] = viewData.count ?? r.viewCount ?? 0
+          } catch {
+            viewsData[r.id] = r.viewCount ?? 0
           }
         }
         setPostLikes(likesData)
+        setPostViews(prev => ({ ...prev, ...viewsData }))
       }
     } catch (e) {
       console.error('Failed to load restaurants:', e)
@@ -214,8 +246,93 @@ function App() {
   useEffect(() => {
     if (page === 'profile' && user) {
       loadUserRestaurants()
+      loadProfileStats()
     }
   }, [page, user])
+
+  async function loadProfileStats() {
+    if (!user) return
+    try {
+      const followingRes = await fetch(`${API_BASE}/users/${user.user_id}/following-count`)
+      const followingData = await followingRes.json()
+      setFollowingCount(followingData.count || 0)
+      const followersRes = await fetch(`${API_BASE}/users/${user.user_id}/followers-count`)
+      const followersData = await followersRes.json()
+      setFollowersCount(followersData.count || 0)
+      const favoritesRes = await fetch(`${API_BASE}/users/${user.user_id}/favorites-count`)
+      const favoritesData = await favoritesRes.json()
+      setFavoritesCount(favoritesData.count || 0)
+    } catch {}
+  }
+
+  async function loadFollowingList() {
+    if (!user) return
+    try {
+      const res = await fetch(`${API_BASE}/users/${user.user_id}/following-list`)
+      const data = await res.json()
+      setFollowingList(data || [])
+    } catch {}
+  }
+
+  async function loadFavoritesList() {
+    if (!user) return
+    try {
+      const res = await fetch(`${API_BASE}/users/${user.user_id}/favorites`)
+      const data = await res.json()
+      setFavoritesList(data || [])
+    } catch {}
+  }
+
+  async function unfollowUser(targetUserId: string) {
+    try {
+      await fetch(`${API_BASE}/users/${targetUserId}/follow`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      })
+      loadFollowingList()
+      loadProfileStats()
+    } catch {}
+  }
+
+  async function handleFollowOtherUser() {
+    if (!user || !otherUser) return
+    try {
+      const res = await fetch(`${API_BASE}/users/${otherUser.user_id}/follow`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      })
+      const data = await res.json()
+      console.log('follow response:', res.status, data)
+      if (data.success) {
+        setOtherUserFollowing(true)
+        loadFollowingList()
+      } else {
+        showAlert(data.error || '关注失败')
+      }
+    } catch (e) {
+      console.error('follow error:', e)
+    }
+  }
+
+  async function handleUnfollowOtherUser() {
+    if (!user || !otherUser) return
+    try {
+      const res = await fetch(`${API_BASE}/users/${otherUser.user_id}/follow`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      })
+      const data = await res.json()
+      console.log('unfollow response:', res.status, data)
+      if (data.success) {
+        setOtherUserFollowing(false)
+        loadFollowingList()
+      } else {
+        showAlert(data.error || '取消关注失败')
+      }
+    } catch (e) {
+      console.error('unfollow error:', e)
+    }
+  }
 
   async function handleAuth(e: React.FormEvent) {
     e.preventDefault()
@@ -397,16 +514,32 @@ function App() {
         const postLikeData = await postLikeRes.json()
         setPostLikes(prev => ({
           ...prev,
-          [id]: { count: data.likeCount || 0, liked: postLikeData.userLiked }
+          [id]: { count: postLikeData.likeCount ?? data.likeCount ?? 0, liked: postLikeData.userLiked ?? false }
         }))
+        console.log('Recording view for post:', id, 'current user:', user.user_id, 'post author:', data.createdByUserId)
+        const viewRes2 = await fetch(`${API_BASE}/posts/${id}/view`, {
+          method: 'POST',
+          headers: getAuthHeaders()
+        })
+        const viewData2 = await viewRes2.json()
+        console.log('View response:', viewRes2.status, viewData2)
+        // Fetch updated view count
+        const viewResCount = await fetch(`${API_BASE}/posts/${id}/views-count`)
+        const viewCountData = await viewResCount.json()
+        console.log('Views count after recording:', viewCountData)
+        setPostViews(prev => ({ ...prev, [id]: viewCountData.count || 0 }))
       } else {
         setPostLikes(prev => ({
           ...prev,
           [id]: { count: data.likeCount || 0, liked: false }
         }))
       }
+      const viewRes = await fetch(`${API_BASE}/posts/${id}/views-count`)
+      const viewData = await viewRes.json()
+      console.log('Views count on load:', viewData)
+      setPostViews(prev => ({ ...prev, [id]: viewData.count || 0 }))
     } catch (e) {
-      showAlert('加载失败')
+      console.error(e)
     }
     setIsLoadingDetail(false)
   }
@@ -416,26 +549,55 @@ function App() {
     setEditingUsername(false)
     loadUserRestaurants()
     setViewFromDetail(false)
+    setProfileMenuState('menu')
     setPage('profile')
   }
 
   async function showOtherProfile(authorUserId: string) {
+    console.log('showOtherProfile called with:', authorUserId)
+    if (!authorUserId) return
     try {
-      const res = await fetch(`${API_BASE}/user/${authorUserId}`)
+      const url = `${API_BASE}/user/${authorUserId}`
+      console.log('Fetching:', url)
+      const res = await fetch(url)
+      console.log('Response status:', res.status)
+      if (!res.ok) {
+        showAlert('用户不存在')
+        return
+      }
       const userData = await res.json()
+      console.log('User data:', userData)
       if (userData.error) {
         showAlert('用户不存在')
         return
       }
+      
       setOtherUser(userData)
-      
-      const res2 = await fetch(`${API_BASE}/user/${authorUserId}/restaurants`)
-      const restaurantsData = await res2.json()
-      setOtherUserRestaurants(restaurantsData || [])
-      
+      setOtherUserRestaurants([])
+      setOtherUserFollowing(false)
       setViewFromDetail(page === 'detail')
       setPage('otherProfile')
+      
+      try {
+        const res2 = await fetch(`${API_BASE}/user/${authorUserId}/restaurants`)
+        if (res2.ok) {
+          const restaurantsData = await res2.json()
+          setOtherUserRestaurants(restaurantsData || [])
+        }
+      } catch {}
+      
+      if (user) {
+        try {
+          const res3 = await fetch(`${API_BASE}/users/${authorUserId}/is-following`, { headers: getAuthHeaders() })
+          const followingData = await res3.json()
+          console.log('is-following response:', JSON.stringify(followingData))
+          setOtherUserFollowing(followingData.following || false)
+        } catch (e) {
+          console.error('is-following error:', e)
+        }
+      }
     } catch (e) {
+      console.error('Error in showOtherProfile:', e)
       showAlert('加载失败')
     }
   }
@@ -601,23 +763,23 @@ function App() {
       
       if (targetType === 'post') {
         const currentLiked = postLikes[targetId]?.liked ?? false
-        const currentCount = postLikes[targetId]?.count ?? currentRestaurant?.likeCount ?? 0
+        const currentCount = Math.max(0, postLikes[targetId]?.count ?? 0)
         const delta = data.liked === currentLiked ? 0 : (data.liked ? 1 : -1)
         setPostLikes(prev => ({
           ...prev,
           [targetId]: {
-            count: currentCount + delta,
+            count: Math.max(0, currentCount + delta),
             liked: data.liked
           }
         }))
       } else {
         const currentLiked = commentLikes[targetId]?.liked ?? false
-        const currentCount = commentLikes[targetId]?.count ?? 0
+        const currentCount = Math.max(0, commentLikes[targetId]?.count ?? 0)
         const delta = data.liked === currentLiked ? 0 : (data.liked ? 1 : -1)
         setCommentLikes(prev => ({
           ...prev,
           [targetId]: {
-            count: currentCount + delta,
+            count: Math.max(0, currentCount + delta),
             liked: data.liked
           }
         }))
@@ -994,6 +1156,28 @@ function App() {
               </Box>
             </Paper>
 
+            {!searchQuery.trim() && (
+              <Box sx={{ mb: 2 }}>
+                <Button 
+                  variant={feedType === 'recommend' ? 'contained' : 'outlined'} 
+                  size="small"
+                  sx={{ mr: 1 }}
+                  onClick={() => setFeedType('recommend')}
+                >
+                  推荐
+                </Button>
+                {user && (
+                  <Button 
+                    variant={feedType === 'following' ? 'contained' : 'outlined'} 
+                    size="small"
+                    onClick={() => setFeedType('following')}
+                  >
+                    关注
+                  </Button>
+                )}
+              </Box>
+            )}
+
             {searchQuery.trim() && (
               <Box sx={{ mb: 2 }}>
                 <Button 
@@ -1050,7 +1234,7 @@ function App() {
                   <Box sx={{ width: { xs: '100%', sm: '50%' } }}>
                     {searchResults.filter((_, i) => i % 2 === 0).map(r => (
                       <Card key={r.id} sx={{ cursor: 'pointer', mb: 1.5 }} onClick={() => showDetail(r.id)}>
-                        {r.images?.[0] && <CardMedia component="img" height="140" image={r.images[0]} alt={r.name} />}
+                        {r.images?.[0] && <CardMedia component="img" height="140" image={r.images[0]} alt={r.name} onError={(e: any) => { e.target.style.display = 'none' }} />}
                         <CardContent>
                           <Typography variant="h6">{r.name}</Typography>
                           <Typography variant="body2" color="text.secondary" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address}</Typography>
@@ -1068,7 +1252,7 @@ function App() {
                   <Box sx={{ width: { xs: '100%', sm: '50%' } }}>
                     {searchResults.filter((_, i) => i % 2 === 1).map(r => (
                       <Card key={r.id} sx={{ cursor: 'pointer', mb: 1.5 }} onClick={() => showDetail(r.id)}>
-                        {r.images?.[0] && <CardMedia component="img" height="140" image={r.images[0]} alt={r.name} />}
+                        {r.images?.[0] && <CardMedia component="img" height="140" image={r.images[0]} alt={r.name} onError={(e: any) => { e.target.style.display = 'none' }} />}
                         <CardContent>
                           <Typography variant="h6">{r.name}</Typography>
                           <Typography variant="body2" color="text.secondary" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address}</Typography>
@@ -1128,7 +1312,7 @@ function App() {
                   <Box sx={{ width: { xs: '100%', sm: '50%' } }}>
                     {restaurants.filter((_, i) => i % 2 === 0).map(r => (
                       <Card key={r.id} sx={{ cursor: 'pointer', mb: 1.5 }} onClick={() => showDetail(r.id)}>
-                        {r.images?.[0] && <CardMedia component="img" height="140" image={r.images[0]} alt={r.name} />}
+                        {r.images?.[0] && <CardMedia component="img" height="140" image={r.images[0]} alt={r.name} onError={(e: any) => { e.target.style.display = 'none' }} />}
                         <CardContent>
                           <Typography variant="h6">{r.name}</Typography>
                           <Typography variant="body2" color="text.secondary" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address}</Typography>
@@ -1137,7 +1321,12 @@ function App() {
                               <Avatar src={r.authorAvatar || '/user.png'} sx={{ width: 24, height: 24, mr: 0.5 }} />
                               <Typography variant="caption">{r.authorUsername || '用户'} ID:{r.createdByUserId}</Typography>
                             </Box>
-                            <Typography variant="caption" color="text.secondary">{r.commentCount} 条评论</Typography>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                              {postLikes[r.id]?.liked ? <Favorite sx={{ fontSize: 14, color: 'error.main' }} /> : <FavoriteBorder sx={{ fontSize: 14 }} />}
+                              <Typography variant="caption">{postLikes[r.id]?.count ?? r.likeCount ?? 0}</Typography>
+                              <VisibilityIcon sx={{ fontSize: 14 }} />
+                              <Typography variant="caption">{postViews[r.id] ?? r.viewCount ?? 0}</Typography>
+                            </Box>
                           </Box>
                         </CardContent>
                       </Card>
@@ -1146,7 +1335,7 @@ function App() {
                   <Box sx={{ width: { xs: '100%', sm: '50%' } }}>
                     {restaurants.filter((_, i) => i % 2 === 1).map(r => (
                       <Card key={r.id} sx={{ cursor: 'pointer', mb: 1.5 }} onClick={() => showDetail(r.id)}>
-                        {r.images?.[0] && <CardMedia component="img" height="140" image={r.images[0]} alt={r.name} />}
+                        {r.images?.[0] && <CardMedia component="img" height="140" image={r.images[0]} alt={r.name} onError={(e: any) => { e.target.style.display = 'none' }} />}
                         <CardContent>
                           <Typography variant="h6">{r.name}</Typography>
                           <Typography variant="body2" color="text.secondary" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address}</Typography>
@@ -1155,7 +1344,12 @@ function App() {
                               <Avatar src={r.authorAvatar || '/user.png'} sx={{ width: 24, height: 24, mr: 0.5 }} />
                               <Typography variant="caption">{r.authorUsername || '用户'} ID:{r.createdByUserId}</Typography>
                             </Box>
-                            <Typography variant="caption" color="text.secondary">{r.commentCount} 条评论</Typography>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                              {postLikes[r.id]?.liked ? <Favorite sx={{ fontSize: 14, color: 'error.main' }} /> : <FavoriteBorder sx={{ fontSize: 14 }} />}
+                              <Typography variant="caption">{postLikes[r.id]?.count ?? r.likeCount ?? 0}</Typography>
+                              <VisibilityIcon sx={{ fontSize: 14 }} />
+                              <Typography variant="caption">{postViews[r.id] ?? r.viewCount ?? 0}</Typography>
+                            </Box>
                           </Box>
                         </CardContent>
                       </Card>
@@ -1217,22 +1411,20 @@ function App() {
                   </Button>
                 </Box>
                 {imagePreviews.length > 0 && (
-                  <Grid container spacing={1} sx={{ mb: 2 }}>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
                     {imagePreviews.map((src, i) => (
-                      <Grid size={i}>
-                        <Box sx={{ position: 'relative' }}>
-                          <img src={src} alt="" style={{ width: 80, height: 80, objectFit: 'cover', borderRadius: 4 }} />
-                          <IconButton
-                            size="small"
-                            sx={{ position: 'absolute', top: -8, right: -8, bgcolor: 'background.paper' }}
-                            onClick={() => removeImage(i, false)}
-                          >
-                            <CloseIcon fontSize="small" />
-                          </IconButton>
-                        </Box>
-                      </Grid>
+                      <Box key={i} sx={{ position: 'relative' }}>
+                        <img src={src} alt="" style={{ width: 80, height: 80, objectFit: 'cover', borderRadius: 4 }} />
+                        <IconButton
+                          size="small"
+                          sx={{ position: 'absolute', top: -8, right: -8, bgcolor: 'background.paper' }}
+                          onClick={() => removeImage(i, false)}
+                        >
+                          <CloseIcon fontSize="small" />
+                        </IconButton>
+                      </Box>
                     ))}
-                  </Grid>
+                  </Box>
                 )}
                 <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
                   <Button variant="outlined" onClick={() => setPage('main')}>取消</Button>
@@ -1276,6 +1468,8 @@ function App() {
                 {postLikes[currentRestaurant.id]?.liked ? <Favorite /> : <FavoriteBorder />}
               </IconButton>
               <span className="like-count">{postLikes[currentRestaurant.id]?.count ?? currentRestaurant.likeCount ?? 0}</span>
+              <VisibilityIcon sx={{ ml: 2, mr: 0.5, fontSize: 20 }} />
+              <span className="view-count">{postViews[currentRestaurant.id] ?? currentRestaurant.viewCount ?? 0}</span>
             </div>
           </div>
           {currentRestaurant.images && currentRestaurant.images.length > 0 && (
@@ -1483,72 +1677,153 @@ function App() {
         )}
 
       {page === 'profile' && user && (
-        <div className="profile-page">
-          <Button startIcon={<ArrowBackIcon />} onClick={() => setPage('main')} sx={{ mb: 2 }}>
-            返回
-          </Button>
-          <div className="profile-header">
-            <div className="avatar-section">
-              <img src={user.avatar} alt="avatar" className="profile-avatar" />
-              <label className="avatar-upload-btn">
-                修改头像
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleUpdateAvatar}
-                  style={{ display: 'none' }}
-                />
-              </label>
-            </div>
-            <div className="profile-info">
-              {editingUsername ? (
-                <div className="username-edit">
+        <Box sx={{ p: 2 }}>
+          {profileMenuState !== 'menu' && (
+            <Button startIcon={<ArrowBackIcon />} onClick={() => setProfileMenuState('menu')} sx={{ mb: 2 }}>
+              返回
+            </Button>
+          )}
+          
+          {profileMenuState === 'menu' && (
+            <>
+              <Box sx={{ textAlign: 'center', mb: 4 }}>
+                <label style={{ cursor: 'pointer', display: 'inline-block' }}>
+                  <Avatar src={user.avatar} sx={{ width: 80, height: 80, mb: 1 }} />
                   <input
-                    type="text"
+                    type="file"
+                    accept="image/*"
+                    onChange={handleUpdateAvatar}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, mb: 1 }}>
+                  <Typography variant="h5">{user.username}</Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ cursor: 'pointer' }} onClick={() => setEditingUsername(true)}>✏️</Typography>
+                </Box>
+                <Typography variant="body2" color="text.secondary">ID: {user.user_id}</Typography>
+                <Typography variant="body2" color="text.secondary">权限: {getPermissionName(user.role)}</Typography>
+                <Box sx={{ display: 'flex', justifyContent: 'center', gap: 3, mt: 1 }}>
+                  <Typography variant="body2">粉丝 {followersCount}</Typography>
+                  <Typography variant="body2">关注 {followingCount}</Typography>
+                </Box>
+              </Box>
+
+              {editingUsername && (
+                <Box sx={{ display: 'flex', gap: 1, mb: 2, justifyContent: 'center' }}>
+                  <TextField
+                    size="small"
                     value={newUsername}
                     onChange={e => setNewUsername(e.target.value)}
                     placeholder="新用户名"
                   />
-                  <button onClick={handleUpdateUsername}>保存</button>
-                  <button onClick={() => setEditingUsername(false)}>取消</button>
-                </div>
+                  <Button size="small" onClick={handleUpdateUsername}>保存</Button>
+                  <Button size="small" onClick={() => setEditingUsername(false)}>取消</Button>
+                </Box>
+              )}
+
+              <Box sx={{ display: 'flex', justifyContent: 'center', gap: 2, mb: 4 }}>
+                <Button variant="outlined" size="small" onClick={() => setShowPasswordModal(true)}>修改密码</Button>
+                {user.role !== 4 && (
+                  <Button variant="outlined" size="small" color="error" onClick={handleDeleteAccountClick}>注销账号</Button>
+                )}
+              </Box>
+
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                <Card sx={{ cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }} onClick={() => setProfileMenuState('manage')}>
+                  <CardContent sx={{ display: 'flex', alignItems: 'center' }}>
+                    <PersonIcon sx={{ mr: 2, color: 'primary.main' }} />
+                    <Typography variant="h6" sx={{ flex: 1 }}>我的发布</Typography>
+                    <Typography variant="body2" color="text.secondary">{userRestaurants.length} 条帖子</Typography>
+                  </CardContent>
+                </Card>
+                <Card sx={{ cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }} onClick={() => { setProfileMenuState('following'); loadFollowingList(); }}>
+                  <CardContent sx={{ display: 'flex', alignItems: 'center' }}>
+                    <ListIcon sx={{ mr: 2, color: 'primary.main' }} />
+                    <Typography variant="h6" sx={{ flex: 1 }}>我的关注</Typography>
+                    <Typography variant="body2" color="text.secondary">{followingCount} 人</Typography>
+                  </CardContent>
+                </Card>
+                <Card sx={{ cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }} onClick={() => { setProfileMenuState('favorites'); loadFavoritesList(); }}>
+                  <CardContent sx={{ display: 'flex', alignItems: 'center' }}>
+                    <StarIcon sx={{ mr: 2, color: 'primary.main' }} />
+                    <Typography variant="h6" sx={{ flex: 1 }}>我的收藏</Typography>
+                    <Typography variant="body2" color="text.secondary">{favoritesCount} 条</Typography>
+                  </CardContent>
+                </Card>
+                <Button fullWidth variant="outlined" color="error" sx={{ mt: 2 }} onClick={logout}>
+                  退出登录
+                </Button>
+              </Box>
+            </>
+          )}
+
+          {profileMenuState === 'manage' && (
+            <div className="profile-page">
+              <div className="my-posts">
+                <Typography variant="h6" sx={{ mb: 2 }}>我发布的帖子</Typography>
+                {userRestaurants.length === 0 ? (
+                  <Box sx={{ textAlign: 'center', py: 4 }}>
+                    <Typography color="text.secondary">暂无帖子</Typography>
+                  </Box>
+                ) : (
+                  userRestaurants.map(r => (
+                    <div key={r.id} className="user-post-card">
+                      <div onClick={() => showDetail(r.id)}>
+                        <h4>{r.name}</h4>
+                        <p>{r.commentCount} 条评论</p>
+                        <span className="post-time">{new Date(r.createdAt).toLocaleString()}</span>
+                      </div>
+                      <button className="delete-btn" onClick={() => handleDeletePost(r.id)}>删除</button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {profileMenuState === 'following' && (
+            <Box>
+              <Typography variant="h6" sx={{ mb: 2 }}>我关注的用户</Typography>
+              {followingList.length === 0 ? (
+                <Typography color="text.secondary">暂无关注</Typography>
               ) : (
-                <div className="username-display">
-                  <h2>{user.username}</h2>
-                  <button onClick={() => setEditingUsername(true)}>修改用户名</button>
+                followingList.map(u => (
+                  <Card key={u.user_id} sx={{ mb: 1, p: 1, display: 'flex', alignItems: 'center' }}>
+                    <Avatar src={u.avatar} sx={{ mr: 2 }} />
+                    <Box sx={{ flex: 1 }}>{u.username}</Box>
+                    <Button size="small" onClick={() => unfollowUser(u.user_id)}>取消</Button>
+                  </Card>
+                ))
+              )}
+            </Box>
+          )}
+
+          {profileMenuState === 'favorites' && (
+            <Box>
+              <Typography variant="h6" sx={{ mb: 2 }}>我的收藏</Typography>
+              {favoritesList.length === 0 ? (
+                <Typography color="text.secondary">暂无收藏</Typography>
+              ) : (
+                <div className="post-grid">
+                  {favoritesList.map(r => (
+                    <div key={r.id} className="post-card" onClick={() => showDetail(r.id)}>
+                      {r.images?.[0] && (
+                        <img src={r.images[0]} alt={r.name} className="post-image" onError={(e: any) => { e.target.style.display = 'none' }} />
+                      )}
+                      <div className="post-content">
+                        <h4 className="post-title">{r.name}</h4>
+                        <p className="post-author">{r.authorUsername || r.createdBy}</p>
+                        <div className="post-stats">
+                          <FavoriteBorder sx={{ fontSize: 14 }} /> {r.likeCount || 0}
+                          <ChatBubbleIcon sx={{ fontSize: 14, ml: 1 }} /> {r.commentCount || 0}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
-              <p className="user-id">用户ID: {user.user_id}</p>
-              <p className="permission">权限: {getPermissionName(user.role)}</p>
-            </div>
-          </div>
-
-          <div className="my-posts">
-            <Typography variant="h6" sx={{ mb: 2 }}>我发布的帖子</Typography>
-            {userRestaurants.length === 0 ? (
-              <Box sx={{ textAlign: 'center', py: 4 }}>
-                <Typography color="text.secondary">暂无帖子</Typography>
-              </Box>
-            ) : (
-              userRestaurants.map(r => (
-                <div key={r.id} className="user-post-card">
-                  <div onClick={() => showDetail(r.id)}>
-                    <h4>{r.name}</h4>
-                    <p>{r.commentCount} 条评论</p>
-                    <span className="post-time">{new Date(r.createdAt).toLocaleString()}</span>
-                  </div>
-                  <button className="delete-btn" onClick={() => handleDeletePost(r.id)}>删除</button>
-                </div>
-              ))
-            )}
-          </div>
-
-          <div className="profile-actions">
-            <button className="action-btn" onClick={() => setShowPasswordModal(true)}>修改密码</button>
-            {user.role !== 4 && (
-              <button className="action-btn danger" onClick={handleDeleteAccountClick}>注销账号</button>
-            )}
-          </div>
+            </Box>
+          )}
 
           {showPasswordModal && (
             <div className="modal-overlay">
@@ -1563,9 +1838,7 @@ function App() {
               </div>
             </div>
           )}
-
-          <button className="logout-btn-full" onClick={logout}>退出登录</button>
-        </div>
+        </Box>
       )}
 
       {page === 'otherProfile' && otherUser && (
@@ -1589,6 +1862,17 @@ function App() {
               <p className="permission">权限: {getPermissionName(otherUser.role)}</p>
               {otherUser.status === 'banned' && <p className="user-banned">已封禁</p>}
             </div>
+          </div>
+
+          <div className="profile-actions">
+            {user && user.user_id !== otherUser.user_id && (
+              <Button 
+                variant={otherUserFollowing ? 'outlined' : 'contained'} 
+                onClick={() => otherUserFollowing ? handleUnfollowOtherUser() : handleFollowOtherUser()}
+              >
+                {otherUserFollowing ? '取消关注' : '关注'}
+              </Button>
+            )}
           </div>
 
           {user && user.role >= 3 && otherUser.user_id !== user.user_id && (

@@ -90,15 +90,28 @@ async function getCurrentUser(c: any): Promise<any | null> {
   const payload = verifyToken(token);
   if (!payload) return null;
   
-  const user = await c.env.DB.prepare(
-    'SELECT * FROM users WHERE id = ?'
-  ).bind(payload.userId).first() as any;
+  const userId = payload.userId;
+  const user_id = payload.user_id;
+  const role = payload.role;
   
-  if (!user || user.status === 'deleted') {
+  if (!user_id && userId) {
+    const user = await c.env.DB.prepare(
+      'SELECT user_id, role, status, username FROM users WHERE id = ?'
+    ).bind(userId).first() as any;
+    if (user) {
+      return { id: userId, user_id: user.user_id, role: user.role, status: user.status, username: user.username };
+    }
     return null;
   }
   
-  return user;
+  if (!user_id) return null;
+  
+  // 如果 token 中有 user_id，也需要查询获取 status 和 username
+  const user = await c.env.DB.prepare(
+    'SELECT role, status, username FROM users WHERE user_id = ?'
+  ).bind(user_id).first() as any;
+  
+  return { id: userId, user_id: user_id, role: role, status: user?.status || 'active', username: user?.username || '' };
 }
 
 function checkPermission(user: any, requiredRoles: string[]): boolean {
@@ -188,7 +201,7 @@ app.post('/api/register', async (c) => {
       'INSERT INTO password_history (user_id, password) VALUES (?, ?)'
     ).bind(result.meta.last_row_id, passwordHash).run();
     
-    const token = createToken({ userId: result.meta.last_row_id, role });
+    const token = createToken({ userId: result.meta.last_row_id, user_id: userId, role });
     
     return c.json({ 
       success: true, 
@@ -230,7 +243,7 @@ app.post('/api/login', async (c) => {
       return c.json({ error: '用户名或密码错误' }, 401);
     }
     
-    const token = createToken({ userId: user.id, role: user.role });
+    const token = createToken({ userId: user.id, user_id: user.user_id, role: user.role });
     
     return c.json({ 
       success: true, 
@@ -334,6 +347,7 @@ app.post('/api/user/delete-account', async (c) => {
   
   try {
     const userId = user.user_id;
+    const databaseUserId = user.id;
     
     // 删除该用户发布的所有帖子
     await c.env.DB.prepare(
@@ -348,6 +362,26 @@ app.post('/api/user/delete-account', async (c) => {
     // 删除该用户的所有点赞
     await c.env.DB.prepare(
       'DELETE FROM likes WHERE user_id = ?'
+    ).bind(userId).run();
+    
+    // 删除该用户的关注（作为 follower）
+    await c.env.DB.prepare(
+      'DELETE FROM follows WHERE follower_id = ?'
+    ).bind(userId).run();
+    
+    // 删除该用户的粉丝（作为 following）
+    await c.env.DB.prepare(
+      'DELETE FROM follows WHERE following_id = ?'
+    ).bind(userId).run();
+    
+    // 删除该用户的收藏
+    await c.env.DB.prepare(
+      'DELETE FROM favorites WHERE user_id = ?'
+    ).bind(userId).run();
+    
+    // 删除该用户的浏览记录
+    await c.env.DB.prepare(
+      'DELETE FROM views WHERE user_id = ?'
     ).bind(userId).run();
     
     // 删除R2中的头像图片
@@ -365,12 +399,12 @@ app.post('/api/user/delete-account', async (c) => {
     // 先删除密码历史记录（外键约束）
     await c.env.DB.prepare(
       'DELETE FROM password_history WHERE user_id = ?'
-    ).bind(user.id).run();
+    ).bind(databaseUserId).run();
     
     // 完全删除用户记录
     await c.env.DB.prepare(
       'DELETE FROM users WHERE id = ?'
-    ).bind(user.id).run();
+    ).bind(databaseUserId).run();
     
     return c.json({ success: true });
   } catch (e) {
@@ -505,21 +539,29 @@ app.post('/api/admin/ban-user', async (c) => {
 
 // 获取用户信息
 app.get('/api/user/:userId', async (c) => {
-  const userId = c.req.param('userId');
-  
-  const user = await c.env.DB.prepare(
-    'SELECT user_id, username, avatar, role, status, createdAt FROM users WHERE user_id = ?'
-  ).bind(userId).first() as any;
-  
-  if (!user) {
-    return c.json({ error: '用户不存在' }, 404);
+  try {
+    const userId = c.req.param('userId');
+    console.log('Fetching user:', userId);
+    
+    const user = await c.env.DB.prepare(
+      'SELECT user_id, username, avatar, role, status, createdAt FROM users WHERE user_id = ?'
+    ).bind(userId).first() as any;
+    
+    console.log('User result:', user);
+    
+    if (!user) {
+      return c.json({ error: '用户不存在' }, 404);
+    }
+    
+    if (user.status === 'deleted') {
+      user.username = '已注销用户';
+    }
+    
+    return c.json(user);
+  } catch (e: any) {
+    console.error('Error fetching user:', e);
+    return c.json({ error: e.message || '服务器错误' }, 500);
   }
-  
-  if (user.status === 'deleted') {
-    user.username = '已注销用户';
-  }
-  
-  return c.json(user);
 });
 
 // 获取当前用户信息
@@ -571,62 +613,75 @@ app.post('/api/user/update-avatar', async (c) => {
 
 // 获取餐厅列表
 app.get('/api/restaurants', async (c) => {
-  const results = await c.env.DB.prepare(
-    'SELECT r.id, r.name, r.address, r.images, r.createdBy, r.createdByUserId, r.createdAt, u.role as authorRole, u.username as authorUsername, u.avatar as authorAvatar, (SELECT COUNT(*) FROM comments WHERE restaurant_id = r.id) as commentCount, (SELECT COUNT(*) FROM likes WHERE target_id = r.id AND target_type = \'post\') as likeCount FROM restaurants r LEFT JOIN users u ON r.createdByUserId = u.user_id ORDER BY CASE WHEN u.role >= 2 THEN 0 ELSE 1 END, r.createdAt DESC'
-  ).all();
-  
-  const restaurants = (results.results || []).map((r: any) => ({
-    ...r,
-    images: typeof r.images === 'string' ? JSON.parse(r.images || '[]') : r.images || []
-  }));
-  
-  return c.json(restaurants);
+  try {
+    console.log('=== loading restaurants ===');
+    const results = await c.env.DB.prepare(
+      'SELECT id, name, address, images, createdBy, createdByUserId, createdAt FROM restaurants ORDER BY createdAt DESC LIMIT 50'
+    ).all();
+    console.log('results:', results);
+    const list = (results.results || []).map((r: any) => {
+      const images = typeof r.images === 'string' ? JSON.parse(r.images || '[]') : r.images || [];
+      return { ...r, commentCount: 0, likeCount: 0, viewCount: 0, images };
+    });
+    console.log('list length:', list.length);
+    return c.json(list);
+  } catch (e) {
+    console.error('Error loading restaurants:', e);
+    return c.json({ error: (e as Error).message }, 500);
+  }
 });
 
 // 创建餐厅
 app.post('/api/restaurants', async (c) => {
-  const user = await getCurrentUser(c);
-  if (!user) {
-    return c.json({ error: '请先登录' }, 401);
-  }
-  
-  if (user.status === 'banned') {
-    return c.json({ error: '账号已被封禁' }, 403);
-  }
-  
-  const formData = await c.req.formData();
-  const name = formData.get('name')?.toString();
-  const address = formData.get('address')?.toString();
-  
-  if (!name || !address) {
-    return c.json({ error: '请填写标题和正文' }, 400);
-  }
-  
-  const images: string[] = [];
-  const files = formData.getAll('images');
-  
-  for (const file of files) {
-    if (file instanceof File && file.size > 0) {
-      const arrayBuffer = await file.arrayBuffer();
-      const ext = file.name.split('.').pop() || 'jpg';
-      const key = 'restaurant/' + generateId() + '.' + ext;
-      
-      await c.env.BUCKET.put(key, arrayBuffer, {
-        httpMetadata: { contentType: file.type }
-      });
-      
-      images.push(R2_PUBLIC_URL + '/' + key);
+  try {
+    console.log('=== creating restaurant ===');
+    const user = await getCurrentUser(c);
+    console.log('user:', user);
+    if (!user) {
+      return c.json({ error: '请先登录' }, 401);
     }
+    
+    if (user.status === 'banned') {
+      return c.json({ error: '账号已被封禁' }, 403);
+    }
+    
+    const formData = await c.req.formData();
+    const name = formData.get('name')?.toString();
+    const address = formData.get('address')?.toString();
+    
+    if (!name || !address) {
+      return c.json({ error: '请填写标题和正文' }, 400);
+    }
+    
+    const images: string[] = [];
+    for (const [key, value] of formData.entries()) {
+      if (key === 'images' || key.startsWith('image_')) {
+        const file = value as File;
+        if (file.size > 0) {
+          const arrayBuffer = await file.arrayBuffer();
+          const key2 = generateId();
+          await c.env.BUCKET.put(key2, arrayBuffer, {
+            httpMetadata: { contentType: file.type }
+          });
+          images.push(R2_PUBLIC_URL + '/' + key2);
+        }
+      }
+    }
+    
+    const id = generateId();
+    const imagesJson = JSON.stringify(images);
+    console.log('inserting restaurant:', { id, name, address, imagesJson, username: user.username, user_id: user.user_id });
+    
+    await c.env.DB.prepare(
+      'INSERT INTO restaurants (id, name, address, images, createdBy, createdByUserId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(id, name, address, imagesJson, user.username, user.user_id, new Date().toISOString()).run();
+    
+    console.log('restaurant created successfully');
+    return c.json({ success: true, restaurant: { id, name, address, images, createdBy: user.username, createdByUserId: user.user_id } });
+  } catch (e: any) {
+    console.error('Error creating restaurant:', e);
+    return c.json({ error: e.message }, 500);
   }
-  
-  const id = generateId();
-  const imagesJson = JSON.stringify(images);
-  
-  await c.env.DB.prepare(
-    'INSERT INTO restaurants (id, name, address, images, createdBy, createdByUserId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).bind(id, name, address, imagesJson, user.username, user.user_id, new Date().toISOString()).run();
-  
-  return c.json({ success: true, restaurant: { id, name, address, images, createdBy: user.username, createdByUserId: user.user_id } });
 });
 
 // 获取用户发布的餐厅
@@ -679,35 +734,27 @@ app.delete('/api/restaurants/:id', async (c) => {
 // 获取餐厅详情
 app.get('/api/restaurants/:id', async (c) => {
   const id = c.req.param('id');
-  
-  const restaurant = await c.env.DB.prepare(
-    'SELECT r.*, u.role as authorRole, u.username as authorUsername, u.avatar as authorAvatar, (SELECT COUNT(*) FROM likes WHERE target_id = r.id AND target_type = \'post\') as likeCount FROM restaurants r LEFT JOIN users u ON r.createdByUserId = u.user_id WHERE r.id = ?'
-  ).bind(id).first();
-  
-  if (!restaurant) {
-    return c.json({ error: '帖子不存在' }, 404);
-  }
-  
-  const comments = await c.env.DB.prepare(
-    'SELECT c.id, c.restaurant_id, c.author, c.author_user_id, c.text, c.images, c.parent_id, c.reply_to_user_id, c.reply_to_username, c.createdAt, u.username, u.avatar, u.status, (SELECT COUNT(*) FROM likes WHERE target_id = c.id AND target_type = \'comment\') as likeCount FROM comments c LEFT JOIN users u ON c.author_user_id = u.user_id WHERE c.restaurant_id = ? ORDER BY c.createdAt ASC'
-  ).bind(id).all();
-  
-  const commentsList = (comments.results || []).map((comment: any) => {
-    const displayName = comment.status === 'deleted' ? '已注销用户' : (comment.username || comment.author);
-    return {
+  try {
+    const restaurant = await c.env.DB.prepare(
+      'SELECT r.*, u.role as authorRole, u.username as authorUsername, u.avatar as authorAvatar FROM restaurants r LEFT JOIN users u ON r.createdByUserId = u.user_id WHERE r.id = ?'
+    ).bind(id).first();
+    if (!restaurant) {
+      return c.json({ error: '帖子不存在' }, 404);
+    }
+    const comments = await c.env.DB.prepare(
+      'SELECT c.*, u.username, u.avatar, u.status FROM comments c LEFT JOIN users u ON c.author_user_id = u.user_id WHERE c.restaurant_id = ? ORDER BY c.createdAt ASC'
+    ).bind(id).all();
+    const commentsList = (comments.results || []).map((comment: any) => ({
       ...comment,
-      author_username: displayName,
+      author_username: comment.status === 'deleted' ? '已注销用户' : (comment.username || comment.author),
       author_avatar: comment.status === 'deleted' ? DEFAULT_AVATAR : comment.avatar,
-      time: comment.createdAt,
       images: typeof comment.images === 'string' ? JSON.parse(comment.images || '[]') : comment.images || []
-    };
-  });
-  
-  return c.json({
-    ...restaurant,
-    images: typeof (restaurant as any).images === 'string' ? JSON.parse((restaurant as any).images || '[]') : (restaurant as any).images || [],
-    comments: commentsList
-  });
+    }));
+    const images = typeof restaurant.images === 'string' ? JSON.parse(restaurant.images || '[]') : restaurant.images || [];
+    return c.json({ ...restaurant, images, comments: commentsList, viewCount: 0 });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
 });
 
 // 添加评论
@@ -893,6 +940,29 @@ app.get('/api/likes/:target_type/:target_id', async (c) => {
   return c.json({ likeCount, userLiked });
 });
 
+// 批量获取帖子点赞状态
+app.get('/api/likes/batch', async (c) => {
+  const ids = c.req.param('ids') || c.req.query('ids') || '';
+  if (!ids) return c.json({});
+  const idList = ids.split(',').filter(Boolean);
+  const user = await getCurrentUser(c);
+  const result: Record<string, { count: number; liked: boolean }> = {};
+  for (const id of idList) {
+    const countRes = await c.env.DB.prepare(
+      'SELECT COUNT(*) as count FROM likes WHERE target_id = ? AND target_type = ?'
+    ).bind(id, 'post').first() as any;
+    let liked = false;
+    if (user) {
+      const likedRes = await c.env.DB.prepare(
+        'SELECT id FROM likes WHERE user_id = ? AND target_id = ? AND target_type = ?'
+      ).bind(user.user_id, id, 'post').first();
+      liked = !!likedRes;
+    }
+    result[id] = { count: countRes?.count || 0, liked };
+  }
+  return c.json(result);
+});
+
 // 获取图片
 app.get('/api/images/:key', async (c) => {
   const key = c.req.param('key');
@@ -988,6 +1058,303 @@ app.get('/api/search/users', async (c) => {
   });
   
   return c.json(filtered);
+});
+
+// ========== 关注系统 ==========
+
+// 关注用户
+app.post('/api/users/:userId/follow', async (c) => {
+  const currentUser = await getCurrentUser(c);
+  if (!currentUser) {
+    return c.json({ error: '请先登录' }, 401);
+  }
+  if (currentUser.status === 'banned') {
+    return c.json({ error: '账号已被封禁' }, 403);
+  }
+  const targetUserId = c.req.param('userId');
+  if (currentUser.user_id === targetUserId) {
+    return c.json({ error: '不能关注自己' }, 400);
+  }
+  const target = await c.env.DB.prepare(
+    'SELECT id FROM users WHERE user_id = ?'
+  ).bind(targetUserId).first();
+  if (!target) {
+    return c.json({ error: '用户不存在' }, 404);
+  }
+  try {
+    await c.env.DB.prepare(
+      'INSERT INTO follows (follower_id, following_id, createdAt) VALUES (?, ?, ?)'
+    ).bind(currentUser.user_id, targetUserId, new Date().toISOString()).run();
+    return c.json({ success: true });
+  } catch (e: any) {
+    if (e.message?.includes('UNIQUE constraint')) {
+      return c.json({ error: '已经关注了' }, 400);
+    }
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 取消关注
+app.delete('/api/users/:userId/follow', async (c) => {
+  const currentUser = await getCurrentUser(c);
+  if (!currentUser) {
+    return c.json({ error: '请先登录' }, 401);
+  }
+  const targetUserId = c.req.param('userId');
+  await c.env.DB.prepare(
+    'DELETE FROM follows WHERE follower_id = ? AND following_id = ?'
+  ).bind(currentUser.user_id, targetUserId).run();
+  return c.json({ success: true });
+});
+
+// 获取粉丝数
+app.get('/api/users/:userId/followers-count', async (c) => {
+  const userId = c.req.param('userId');
+  const result = await c.env.DB.prepare(
+    'SELECT COUNT(*) as count FROM follows WHERE following_id = ?'
+  ).bind(userId).first() as any;
+  return c.json({ count: result?.count || 0 });
+});
+
+// 获取收藏数
+app.get('/api/users/:userId/favorites-count', async (c) => {
+  const userId = c.req.param('userId');
+  const result = await c.env.DB.prepare(
+    'SELECT COUNT(*) as count FROM favorites WHERE user_id = ?'
+  ).bind(userId).first() as any;
+  return c.json({ count: result?.count || 0 });
+});
+
+// 获取关注数
+app.get('/api/users/:userId/following-count', async (c) => {
+  const userId = c.req.param('userId');
+  try {
+    const result = await c.env.DB.prepare(
+      'SELECT COUNT(*) as count FROM follows WHERE follower_id = ?'
+    ).bind(userId).first() as any;
+    return c.json({ count: result?.count || 0 });
+  } catch (e: any) {
+    console.error('following-count error:', e);
+    return c.json({ count: 0 });
+  }
+});
+
+// 获取关注列表 (返回用户关注的列表)
+app.get('/api/users/:userId/following-list', async (c) => {
+  const userId = c.req.param('userId');
+  try {
+    const results = await c.env.DB.prepare(
+      'SELECT u.user_id, u.username, u.avatar, f.createdAt FROM follows f JOIN users u ON f.following_id = u.user_id WHERE f.follower_id = ? AND u.status != ? ORDER BY f.createdAt DESC'
+    ).bind(userId, 'deleted').all();
+    return c.json(results.results || []);
+  } catch (e: any) {
+    console.error('following-list error:', e);
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// 获取粉丝列表
+app.get('/api/users/:userId/followers', async (c) => {
+  const userId = c.req.param('userId');
+  const results = await c.env.DB.prepare(
+    'SELECT u.user_id, u.username, u.avatar, f.createdAt FROM follows f JOIN users u ON f.follower_id = u.user_id WHERE f.following_id = ? AND u.status != ? ORDER BY f.createdAt DESC'
+  ).bind(userId, 'deleted').all();
+  return c.json(results.results || []);
+});
+
+// 调试 API - 获取 follows 表数据
+app.get('/api/debug/follows', async (c) => {
+  const follows = await c.env.DB.prepare('SELECT * FROM follows').all();
+  return c.json({ results: follows.results, count: follows.results?.length || 0 });
+});
+
+// 检查是否已关注
+app.get('/api/users/:userId/is-following', async (c) => {
+  const currentUser = await getCurrentUser(c);
+  const targetUserId = c.req.param('userId');
+  
+  if (!currentUser) {
+    return c.json({ following: false, error: 'not logged in' });
+  }
+  
+  const result = await c.env.DB.prepare(
+    'SELECT id FROM follows WHERE follower_id = ? AND following_id = ?'
+  ).bind(currentUser.user_id, targetUserId).all();
+  
+  const following = !!(result.results && result.results.length > 0);
+  return c.json({ following });
+});
+
+// ========== 收藏系统 ==========
+
+// 收藏帖子
+app.post('/api/posts/:postId/favorite', async (c) => {
+  const currentUser = await getCurrentUser(c);
+  if (!currentUser) {
+    return c.json({ error: '请先登录' }, 401);
+  }
+  if (currentUser.status === 'banned') {
+    return c.json({ error: '账号已被封禁' }, 403);
+  }
+  const postId = c.req.param('postId');
+  const post = await c.env.DB.prepare(
+    'SELECT id FROM restaurants WHERE id = ?'
+  ).bind(postId).first();
+  if (!post) {
+    return c.json({ error: '帖子不存在' }, 404);
+  }
+  try {
+    await c.env.DB.prepare(
+      'INSERT INTO favorites (user_id, post_id, createdAt) VALUES (?, ?, ?)'
+    ).bind(currentUser.user_id, postId, new Date().toISOString()).run();
+    return c.json({ success: true });
+  } catch (e: any) {
+    if (e.message?.includes('UNIQUE constraint')) {
+      return c.json({ error: '已经收藏了' }, 400);
+    }
+    throw e;
+  }
+});
+
+// 取消收藏
+app.delete('/api/posts/:postId/favorite', async (c) => {
+  const currentUser = await getCurrentUser(c);
+  if (!currentUser) {
+    return c.json({ error: '请先登录' }, 401);
+  }
+  const postId = c.req.param('postId');
+  await c.env.DB.prepare(
+    'DELETE FROM favorites WHERE user_id = ? AND post_id = ?'
+  ).bind(currentUser.user_id, postId).run();
+  return c.json({ success: true });
+});
+
+// 获取用户收藏列表
+app.get('/api/users/:userId/favorites', async (c) => {
+  const userId = c.req.param('userId');
+  const results = await c.env.DB.prepare(
+    `SELECT r.id, r.name, r.address, r.images, r.createdByUserId, r.createdAt, r.createdBy,
+     (SELECT COUNT(*) FROM comments WHERE restaurant_id = r.id) as commentCount,
+     (SELECT COUNT(*) FROM likes WHERE target_id = r.id AND target_type = 'post') as likeCount,
+     f.createdAt as favoritedAt
+     FROM favorites f 
+     JOIN restaurants r ON f.post_id = r.id 
+     WHERE f.user_id = ? 
+     ORDER BY f.createdAt DESC`
+  ).bind(userId).all();
+  const list = (results.results || []).map((r: any) => ({
+    ...r,
+    images: typeof r.images === 'string' ? JSON.parse(r.images || '[]') : r.images || []
+  }));
+  return c.json(list);
+});
+
+// 检查是否已收藏
+app.get('/api/posts/:postId/favorited', async (c) => {
+  const currentUser = await getCurrentUser(c);
+  const postId = c.req.param('postId');
+  if (!currentUser) {
+    return c.json({ favorited: false });
+  }
+  const result = await c.env.DB.prepare(
+    'SELECT id FROM favorites WHERE user_id = ? AND post_id = ?'
+  ).bind(currentUser.user_id, postId).first();
+  return c.json({ favorited: !!result });
+});
+
+// ========== 观看系统 ==========
+
+// 标记观看
+app.post('/api/posts/:postId/view', async (c) => {
+  try {
+    const currentUser = await getCurrentUser(c);
+    const postId = c.req.param('postId');
+    console.log('=== VIEW POST ===');
+    console.log('currentUser:', currentUser?.user_id);
+    console.log('postId:', postId);
+    
+    // 检查帖子是否存在
+    const post = await c.env.DB.prepare(
+      'SELECT createdByUserId FROM restaurants WHERE id = ?'
+    ).bind(postId).first() as any;
+    console.log('post author:', post?.createdByUserId);
+    
+    if (!post) {
+      return c.json({ error: '帖子不存在' }, 404);
+    }
+    
+    // 如果未登录，不计数
+    if (!currentUser) {
+      console.log('User not logged in');
+      return c.json({ success: true, message: '未登录' });
+    }
+    
+    // 检查是否是作者自己
+    if (post.createdByUserId === currentUser.user_id) {
+      console.log('User is author, not counting');
+      return c.json({ success: true, message: '作者本人' });
+    }
+    
+    // 记录观看
+    console.log('Recording view for user:', currentUser.user_id);
+    await c.env.DB.prepare(
+      'INSERT INTO views (user_id, post_id, createdAt) VALUES (?, ?, ?)'
+    ).bind(currentUser.user_id, postId, new Date().toISOString()).run();
+    
+    console.log('View recorded successfully');
+    return c.json({ success: true, message: '已记录观看' });
+  } catch (e: any) {
+    console.log('View error:', e.message);
+    return c.json({ success: true, message: '重复观看或错误: ' + e.message });
+  }
+});
+
+// 获取观看数
+app.get('/api/posts/:postId/views-count', async (c) => {
+  try {
+    const postId = c.req.param('postId');
+    const result = await c.env.DB.prepare(
+      'SELECT COUNT(*) as count FROM views WHERE post_id = ?'
+    ).bind(postId).first() as any;
+    console.log('views-count for', postId, ':', result?.count || 0);
+    return c.json({ count: result?.count || 0 });
+  } catch (e: any) {
+    console.error('views-count error:', e);
+    return c.json({ count: 0 });
+  }
+});
+
+// 获取关注者帖子
+app.get('/api/following-posts', async (c) => {
+  try {
+    const currentUser = await getCurrentUser(c);
+    if (!currentUser) {
+      return c.json({ error: '请先登录' }, 401);
+    }
+    const userId = currentUser.user_id;
+    
+    const follows = await c.env.DB.prepare(
+      'SELECT following_id FROM follows WHERE follower_id = ?'
+    ).bind(userId).all() as any;
+    
+    // D1 返回格式处理
+    const followResults = follows?.results || [];
+    if (followResults.length === 0) {
+      return c.json([]);
+    }
+    
+    const followingIds = followResults.map((f: any) => f.following_id);
+    
+    const posts = await c.env.DB.prepare(
+      `SELECT * FROM restaurants WHERE createdByUserId IN (${followingIds.map(() => '?').join(',')}) ORDER BY createdAt DESC LIMIT 50`
+    ).bind(...followingIds).all() as any;
+    
+    return c.json(posts?.results || []);
+    
+  } catch (e: any) {
+    console.error('Error in following-posts:', e);
+    return c.json({ error: e.message }, 500);
+  }
 });
 
 app.get('*', (c) => {

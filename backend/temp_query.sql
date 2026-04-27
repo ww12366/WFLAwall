@@ -1,1 +1,1 @@
-SELECT * FROM users;
+SELECT follower_id || ' follows ' || following_id as follow_relation FROM follows;
